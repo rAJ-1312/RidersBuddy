@@ -1,0 +1,18 @@
+[project]
+name = "personal-learning"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "alembic>=1.17.2",
+    "fastapi>=0.124.4",
+    "loguru>=0.7.3",
+    "neo4j>=5.14.0",
+    "neomodel>=6.0.1",
+    "psycopg2-binary>=2.9.11",
+    "pydantic[email]>=2.12.5",
+    "python-dotenv>=1.2.1",
+    "sqlalchemy>=2.0.45",
+    "uvicorn>=0.38.0",
+]

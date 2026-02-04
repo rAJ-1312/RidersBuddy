@@ -1,0 +1,3 @@
+TODOs:
+- Looks into polymorphism and how to integrated here
+- Export neo4j and postgres state and gives a visualization of current state of application
