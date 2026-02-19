@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from enum import Enum
-from sqlalchemy import String, ForeignKey, DateTime, Float, Text, Integer, Boolean, JSON
+from sqlalchemy import String, ForeignKey, DateTime, Float, Integer, Numeric
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .database import Base
 
@@ -16,15 +16,6 @@ class Difficulty(str, Enum):
     EASY = "easy"
     MODERATE = "moderate"
     HARD = "hard"
-    EXTREME = "extreme"
-
-
-class RouteType(str, Enum):
-    SCENIC = "scenic"
-    HIGHWAY = "highway"
-    OFFROAD = "offroad"
-    MOUNTAIN = "mountain"
-    COASTAL = "coastal"
 
 
 class Rider(Base):
@@ -35,31 +26,34 @@ class Rider(Base):
     experience_level: Mapped[str] = mapped_column(
         String(20), default=ExperienceLevel.BEGINNER.value
     )
-    joined_at: Mapped[datetime] = mapped_column(
+    created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )
 
-    bikes: Mapped[list["Bike"]] = relationship(
-        back_populates="owner",
-        cascade="all, delete-orphan",
-    )
     rides: Mapped[list["Ride"]] = relationship(
         back_populates="rider",
         cascade="all, delete-orphan",
     )
 
 
-class Bike(Base):
-    __tablename__ = "bikes"
+class Waypoint(Base):
+    __tablename__ = "waypoints"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    owner_id: Mapped[int] = mapped_column(ForeignKey("riders.id"))
-    brand: Mapped[str] = mapped_column(String(50))
-    model: Mapped[str] = mapped_column(String(50))
-    year: Mapped[int] = mapped_column()
-    engine_cc: Mapped[int] = mapped_column()
+    name: Mapped[str] = mapped_column(String(200))
+    grid_x: Mapped[int] = mapped_column(Integer, index=True)
+    grid_y: Mapped[int] = mapped_column(Integer, index=True)
+    lat: Mapped[float] = mapped_column(Numeric(10, 7))
+    lng: Mapped[float] = mapped_column(Numeric(10, 7))
+    type: Mapped[str] = mapped_column(String(50))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
 
-    owner: Mapped["Rider"] = relationship(back_populates="bikes")
+    route_waypoints: Mapped[list["RouteWaypoint"]] = relationship(
+        back_populates="waypoint",
+        cascade="all, delete-orphan",
+    )
 
 
 class Route(Base):
@@ -67,47 +61,37 @@ class Route(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(200), unique=True, index=True)
-    route_type: Mapped[str] = mapped_column(String(20), default=RouteType.SCENIC.value, index=True)
-    start_location: Mapped[str] = mapped_column(String(200))
-    end_location: Mapped[str] = mapped_column(String(200))
-    distance_km: Mapped[float] = mapped_column(Float)
     difficulty: Mapped[str] = mapped_column(String(20), index=True)
-    description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    
-    # Scenic route fields
-    scenic_points: Mapped[list | None] = mapped_column(JSON, nullable=True)
-    best_season: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    photography_spots: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    
-    # Highway route fields
-    speed_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    toll_cost: Mapped[float | None] = mapped_column(Float, nullable=True)
-    rest_stops: Mapped[list | None] = mapped_column(JSON, nullable=True)
-    lanes: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    
-    # Offroad route fields
-    terrain_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    min_bike_cc: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    technical_difficulty: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    requires_experience: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    
-    # Mountain route fields
-    elevation_gain: Mapped[float | None] = mapped_column(Float, nullable=True)
-    max_altitude: Mapped[float | None] = mapped_column(Float, nullable=True)
-    hairpin_turns: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    oxygen_required: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    
-    # Coastal route fields
-    beach_stops: Mapped[list | None] = mapped_column(JSON, nullable=True)
-    lighthouse_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    seafood_spots: Mapped[list | None] = mapped_column(JSON, nullable=True)
-    ocean_view_percentage: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    distance_km: Mapped[float] = mapped_column(Float)
+    start_waypoint_id: Mapped[int] = mapped_column(ForeignKey("waypoints.id"))
+    end_waypoint_id: Mapped[int] = mapped_column(ForeignKey("waypoints.id"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
 
+    start_waypoint: Mapped["Waypoint"] = relationship(foreign_keys=[start_waypoint_id])
+    end_waypoint: Mapped["Waypoint"] = relationship(foreign_keys=[end_waypoint_id])
+    waypoints: Mapped[list["RouteWaypoint"]] = relationship(
+        back_populates="route",
+        cascade="all, delete-orphan",
+        order_by="RouteWaypoint.sequence_order",
+    )
     rides: Mapped[list["Ride"]] = relationship(
         back_populates="route",
         cascade="all, delete-orphan",
     )
+
+
+class RouteWaypoint(Base):
+    __tablename__ = "route_waypoints"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    route_id: Mapped[int] = mapped_column(ForeignKey("routes.id"), index=True)
+    waypoint_id: Mapped[int] = mapped_column(ForeignKey("waypoints.id"), index=True)
+    sequence_order: Mapped[int] = mapped_column(Integer)
+
+    route: Mapped["Route"] = relationship(back_populates="waypoints")
+    waypoint: Mapped["Waypoint"] = relationship(back_populates="route_waypoints")
 
 
 class Ride(Base):
@@ -116,10 +100,10 @@ class Ride(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     rider_id: Mapped[int] = mapped_column(ForeignKey("riders.id"))
     route_id: Mapped[int] = mapped_column(ForeignKey("routes.id"))
-    bike_id: Mapped[int] = mapped_column(ForeignKey("bikes.id"))
-    completed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    duration_minutes: Mapped[int | None] = mapped_column(nullable=True)
-    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    completed_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+    rating: Mapped[int] = mapped_column(Integer)
 
     rider: Mapped["Rider"] = relationship(back_populates="rides")
     route: Mapped["Route"] = relationship(back_populates="rides")
