@@ -1,62 +1,59 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from app.api.rider.schemas import RideCreate, RideRead
-from app.db.database import get_postgres_session
-from app.exceptions import ResourceNotFoundError
-import app.db.postgres_crud as pg_crud
-import app.db.neo4j_crud as neo_crud
+from neo4j import Session as Neo4jSession
+from app.api.ride.schemas import RideCreate, RideRead
+from app.db.database import get_postgres_session, get_neo4j_session
+from app.db.postgres_models import Ride, Rider, Route
 
 ride_router = APIRouter()
 
 
-@ride_router.post("", response_model=RideRead, tags=["Rides"])
-def log_ride(
+@ride_router.post("", response_model=RideRead)
+def create_ride(
     ride: RideCreate,
-    db: Session = Depends(get_postgres_session),
+    pg_db: Session = Depends(get_postgres_session),
+    neo4j_db: Neo4jSession = Depends(get_neo4j_session),
 ):
-    route = pg_crud.get_route_by_id(db, ride.route_id)
+    rider = pg_db.query(Rider).filter(Rider.id == ride.rider_id).first()
+    if not rider:
+        raise HTTPException(status_code=404, detail="Rider not found")
+
+    route = pg_db.query(Route).filter(Route.id == ride.route_id).first()
     if not route:
-        raise ResourceNotFoundError(resource="Route", identifier=ride.route_id)
-    
-    bike = pg_crud.get_bike_by_id(db, ride.bike_id)
-    if not bike:
-        raise ResourceNotFoundError(resource="Bike", identifier=ride.bike_id)
-    
-    rider_id = bike.owner_id
-    
-    db_ride = pg_crud.create_ride(
-        db,
-        rider_id=rider_id,
+        raise HTTPException(status_code=404, detail="Route not found")
+
+    db_ride = Ride(
+        rider_id=ride.rider_id,
         route_id=ride.route_id,
-        bike_id=ride.bike_id,
-        duration_minutes=ride.duration_minutes,
-        notes=ride.notes,
+        rating=ride.rating,
     )
-    
-    ride_node = neo_crud.create_ride_node(db_ride)
-    neo_crud.connect_ride_to_rider(rider_id, db_ride.id)
-    neo_crud.connect_ride_to_route(db_ride.id, ride.route_id)
-    neo_crud.connect_ride_to_bike(db_ride.id, ride.bike_id)
-    
+    pg_db.add(db_ride)
+    pg_db.flush()
+
+    neo4j_db.run(
+        """
+        MATCH (rider:Rider {pg_id: $rider_id})
+        MATCH (route:Route {pg_id: $route_id})
+        CREATE (rider)-[:COMPLETED {
+            completed_at: datetime(),
+            rating: $rating
+        }]->(route)
+        """,
+        rider_id=ride.rider_id,
+        route_id=ride.route_id,
+        rating=ride.rating,
+    )
+
+    pg_db.commit()
     return db_ride
 
 
-@ride_router.delete("/{ride_id}", tags=["Rides"])
-def delete_ride(
-    ride_id: int,
-    db: Session = Depends(get_postgres_session),
+@ride_router.get("", response_model=list[RideRead])
+def list_rides(
+    rider_id: int | None = None,
+    pg_db: Session = Depends(get_postgres_session),
 ):
-    """Delete a logged ride (e.g., if added by mistake)"""
-    ride = pg_crud.get_ride_by_id(db, ride_id)
-    if not ride:
-        raise ResourceNotFoundError(resource="Ride", identifier=ride_id)
-    
-    # Delete from Neo4j first
-    neo_crud.delete_ride_node(ride_id)
-    
-    # Delete from PostgreSQL
-    success = pg_crud.delete_ride(db, ride_id)
-    if not success:
-        raise ResourceNotFoundError(resource="Ride", identifier=ride_id)
-    
-    return {"message": f"Ride {ride_id} deleted successfully"}
+    query = pg_db.query(Ride)
+    if rider_id:
+        query = query.filter(Ride.rider_id == rider_id)
+    return query.all()

@@ -1,125 +1,161 @@
-from fastapi import APIRouter, Depends, Query, Body
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import IntegrityError
-from typing import Union, Annotated
+from neo4j import Session as Neo4jSession
 from app.api.route.schemas import (
-    ScenicRouteCreate, HighwayRouteCreate, OffroadRouteCreate,
-    MountainRouteCreate, CoastalRouteCreate, RouteRead
+    RouteDiscoverRequest,
+    RouteDiscoverResponse,
+    WaypointInRoute,
+    RouteCreate,
+    RouteRead,
 )
-from app.api.route.examples import ALL_ROUTE_EXAMPLES
-from app.db.database import get_postgres_session
-from app.exceptions import DuplicateResourceError
-import app.db.postgres_crud as pg_crud
-import app.db.neo4j_crud as neo_crud
+from app.db.database import get_postgres_session, get_neo4j_session
+from app.db.postgres_models import Route, RouteWaypoint, Waypoint
 
 route_router = APIRouter()
 
 
-@route_router.post("", response_model=RouteRead, tags=["Routes"])
-def create_route(
-    route: Annotated[
-        Union[ScenicRouteCreate, HighwayRouteCreate, OffroadRouteCreate, MountainRouteCreate, CoastalRouteCreate],
-        Body(
-            openapi_examples={
-                "scenic_route": {
-                    "summary": "Scenic Route Example",
-                    "description": "Create a scenic route with viewpoints and photography spots",
-                    "value": ALL_ROUTE_EXAMPLES["scenic_route"]
-                },
-                "highway_route": {
-                    "summary": "Highway Route Example",
-                    "description": "Create a highway route with speed limits and tolls",
-                    "value": ALL_ROUTE_EXAMPLES["highway_route"]
-                },
-                "offroad_route": {
-                    "summary": "Offroad Route Example",
-                    "description": "Create an offroad route with terrain and technical difficulty",
-                    "value": ALL_ROUTE_EXAMPLES["offroad_route"]
-                },
-                "mountain_route": {
-                    "summary": "Mountain Route Example",
-                    "description": "Create a mountain route with elevation and hairpin turns",
-                    "value": ALL_ROUTE_EXAMPLES["mountain_route"]
-                },
-                "coastal_route": {
-                    "summary": "Coastal Route Example",
-                    "description": "Create a coastal route with beach stops and ocean views",
-                    "value": ALL_ROUTE_EXAMPLES["coastal_route"]
-                }
-            }
+@route_router.post("/discover", response_model=RouteDiscoverResponse)
+def discover_route(
+    request: RouteDiscoverRequest,
+    neo4j_db: Neo4jSession = Depends(get_neo4j_session),
+):
+    result = neo4j_db.run(
+        """
+        MATCH (start:Waypoint {grid_x: $start_x, grid_y: $start_y})
+        MATCH (end:Waypoint {grid_x: $end_x, grid_y: $end_y})
+        MATCH path = shortestPath(
+            (start)-[:GRID_ADJACENT*1..$max_hops]->(end)
         )
-    ],
-    db: Session = Depends(get_postgres_session),
-):
-    """Create a new route of various types"""
-    try:
-        # Extract common fields
-        route_data = {
-            "name": route.name,
-            "start_location": route.start_location,
-            "end_location": route.end_location,
-            "distance_km": route.distance_km,
-            "difficulty": route.difficulty.value,
-            "description": route.description,
-            "route_type": route.route_type.value,
-        }
-        
-        # Add type-specific fields based on route type
-        if isinstance(route, ScenicRouteCreate):
-            route_data.update({
-                "scenic_points": route.scenic_points,
-                "best_season": route.best_season,
-                "photography_spots": route.photography_spots,
-            })
-        elif isinstance(route, HighwayRouteCreate):
-            route_data.update({
-                "speed_limit": route.speed_limit,
-                "toll_cost": route.toll_cost,
-                "rest_stops": route.rest_stops,
-                "lanes": route.lanes,
-            })
-        elif isinstance(route, OffroadRouteCreate):
-            route_data.update({
-                "terrain_type": route.terrain_type,
-                "min_bike_cc": route.min_bike_cc,
-                "technical_difficulty": route.technical_difficulty,
-                "requires_experience": route.requires_experience,
-            })
-        elif isinstance(route, MountainRouteCreate):
-            route_data.update({
-                "elevation_gain": route.elevation_gain,
-                "max_altitude": route.max_altitude,
-                "hairpin_turns": route.hairpin_turns,
-                "oxygen_required": route.oxygen_required,
-            })
-        elif isinstance(route, CoastalRouteCreate):
-            route_data.update({
-                "beach_stops": route.beach_stops,
-                "lighthouse_count": route.lighthouse_count,
-                "seafood_spots": route.seafood_spots,
-                "ocean_view_percentage": route.ocean_view_percentage,
-            })
-        
-        db_route = pg_crud.create_route(db, **route_data)
-        neo_crud.create_route_node(db_route)
-        return db_route
-    except IntegrityError:
-        raise DuplicateResourceError(resource="Route", detail=f"Route with name '{route.name}' already exists")
-
-
-@route_router.get("", response_model=list[RouteRead], tags=["Routes"])
-def list_routes(
-    difficulty: str | None = Query(None),
-    min_distance: float | None = Query(None),
-    max_distance: float | None = Query(None),
-    route_type: str | None = Query(None, description="Filter by route type: scenic, highway, offroad, mountain, coastal"),
-    db: Session = Depends(get_postgres_session),
-):
-    """List all routes with optional filters"""
-    return pg_crud.get_routes(
-        db, 
-        difficulty=difficulty, 
-        min_distance=min_distance, 
-        max_distance=max_distance,
-        route_type=route_type
+        WITH nodes(path) as waypoints, 
+             relationships(path) as rels
+        RETURN waypoints,
+               reduce(dist = 0, r IN rels | dist + r.distance_km) as total_distance
+        LIMIT 1
+        """,
+        start_x=request.start_grid[0],
+        start_y=request.start_grid[1],
+        end_x=request.end_grid[0],
+        end_y=request.end_grid[1],
+        max_hops=request.max_waypoints,
     )
+
+    record = result.single()
+    if not record:
+        raise HTTPException(status_code=404, detail="No path found")
+
+    waypoints = []
+    for node in record["waypoints"]:
+        waypoints.append(
+            WaypointInRoute(
+                id=node["pg_id"],
+                name=node["name"],
+                grid=[node["grid_x"], node["grid_y"]],
+                lat=node["lat"],
+                lng=node["lng"],
+            )
+        )
+
+    return RouteDiscoverResponse(
+        waypoints=waypoints,
+        total_distance_km=round(record["total_distance"], 2),
+    )
+
+
+@route_router.post("", response_model=RouteRead)
+def create_route(
+    route: RouteCreate,
+    pg_db: Session = Depends(get_postgres_session),
+    neo4j_db: Neo4jSession = Depends(get_neo4j_session),
+):
+    if len(route.waypoint_ids) < 2:
+        raise HTTPException(status_code=400, detail="Route must have at least 2 waypoints")
+
+    waypoints = pg_db.query(Waypoint).filter(Waypoint.id.in_(route.waypoint_ids)).all()
+    if len(waypoints) != len(route.waypoint_ids):
+        raise HTTPException(status_code=404, detail="One or more waypoints not found")
+
+    waypoint_map = {w.id: w for w in waypoints}
+    ordered_waypoints = [waypoint_map[wid] for wid in route.waypoint_ids]
+
+    total_distance = 0.0
+    for i in range(len(ordered_waypoints) - 1):
+        w1, w2 = ordered_waypoints[i], ordered_waypoints[i + 1]
+        from app.spatial.grid import calculate_distance
+        total_distance += calculate_distance(
+            float(w1.lat), float(w1.lng),
+            float(w2.lat), float(w2.lng)
+        )
+
+    db_route = Route(
+        name=route.name,
+        difficulty=route.difficulty,
+        distance_km=round(total_distance, 2),
+        start_waypoint_id=route.waypoint_ids[0],
+        end_waypoint_id=route.waypoint_ids[-1],
+    )
+    pg_db.add(db_route)
+    pg_db.flush()
+
+    for seq, waypoint_id in enumerate(route.waypoint_ids):
+        route_waypoint = RouteWaypoint(
+            route_id=db_route.id,
+            waypoint_id=waypoint_id,
+            sequence_order=seq,
+        )
+        pg_db.add(route_waypoint)
+
+    neo4j_db.run(
+        """
+        CREATE (r:Route {
+            pg_id: $pg_id,
+            name: $name,
+            difficulty: $difficulty,
+            distance_km: $distance_km
+        })
+        """,
+        pg_id=db_route.id,
+        name=db_route.name,
+        difficulty=db_route.difficulty,
+        distance_km=db_route.distance_km,
+    )
+
+    neo4j_db.run(
+        """
+        MATCH (r:Route {pg_id: $route_id})
+        MATCH (start:Waypoint {pg_id: $start_id})
+        MATCH (end:Waypoint {pg_id: $end_id})
+        CREATE (r)-[:STARTS_AT]->(start)
+        CREATE (r)-[:ENDS_AT]->(end)
+        """,
+        route_id=db_route.id,
+        start_id=route.waypoint_ids[0],
+        end_id=route.waypoint_ids[-1],
+    )
+
+    for seq, waypoint_id in enumerate(route.waypoint_ids):
+        neo4j_db.run(
+            """
+            MATCH (r:Route {pg_id: $route_id})
+            MATCH (w:Waypoint {pg_id: $waypoint_id})
+            CREATE (r)-[:PASSES_THROUGH {sequence: $sequence}]->(w)
+            """,
+            route_id=db_route.id,
+            waypoint_id=waypoint_id,
+            sequence=seq,
+        )
+
+    pg_db.commit()
+    return db_route
+
+
+@route_router.get("", response_model=list[RouteRead])
+def list_routes(pg_db: Session = Depends(get_postgres_session)):
+    return pg_db.query(Route).all()
+
+
+@route_router.get("/{route_id}", response_model=RouteRead)
+def get_route(route_id: int, pg_db: Session = Depends(get_postgres_session)):
+    route = pg_db.query(Route).filter(Route.id == route_id).first()
+    if not route:
+        raise HTTPException(status_code=404, detail="Route not found")
+    return route
